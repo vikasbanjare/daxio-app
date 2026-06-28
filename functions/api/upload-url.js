@@ -1,34 +1,33 @@
 // ============================================================
-// Daxio — Public share endpoint  ->  GET /api/share/:token
-//
-// A Cloudflare Pages Function that lets an *anonymous* (no-account)
-// viewer open a project or a single asset that a team member shared.
+// /functions/api/upload-url.js  —  Cloudflare Pages Function
+// ------------------------------------------------------------
+// Mints a short-lived, browser-uploadable PUT URL for Cloudflare R2.
 //
 // Flow:
-//   1. Look up share_links by the token in the URL.
-//        - not found            -> 404
-//        - expired (expires_at) -> 410
-//        - password set & ?pw=  -> must match, else 401
-//   2. Using the SERVICE ROLE key (which bypasses Row-Level Security),
-//      load the linked project (or asset) and walk down to its
-//      assets -> versions -> comments, and return ONE JSON payload the
-//      external review page can render.
+//   1. Browser POSTs { filename, contentType } with a Supabase JWT in the
+//      Authorization header.
+//   2. We verify that JWT against Supabase's /auth/v1/user endpoint.
+//   3. We build a per-object key and PRESIGN an S3 PUT request to R2 using
+//      AWS Signature Version 4 — implemented from scratch with Web Crypto
+//      (crypto.subtle) so the function stays ZERO-dependency on the Workers
+//      runtime (no aws-sdk, no npm).
+//   4. We return { uploadUrl, key, publicUrl }. The browser then does a plain
+//      PUT (no auth header, no extra signed headers) straight to R2 — big
+//      files never transit our server.
 //
-// Why the service role is safe here: RLS would normally hide these rows
-// from an anonymous request, but the share token *is* the authorization —
-// we only ever return the exact project/asset the token points at, and we
-// strip the password before sending anything back.
-//
-// Runs on the Cloudflare Workers runtime — Web standards only, no Node.
+// SECURITY NOTE: this is the most sensitive file in the kit. The presign must
+// be byte-exact or R2 rejects the upload with SignatureDoesNotMatch, so every
+// step below is commented. Secrets (R2 keys, service role) live only in
+// Cloudflare env and never reach the browser.
 // ============================================================
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-
-// Permissive, read-only CORS so the share page can be hosted anywhere.
-const CORS = {
+// --- CORS ---------------------------------------------------
+// Permissive CORS so the static frontend (possibly a different origin during
+// local dev / preview) can call this endpoint and read the JSON response.
+const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, x-share-password',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Authorization, Content-Type',
   'Access-Control-Max-Age': '86400',
 };
 
@@ -36,155 +35,246 @@ const CORS = {
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'Content-Type': 'application/json', ...CORS },
+    headers: { 'Content-Type': 'application/json', ...CORS_HEADERS },
   });
 }
 
-// Preflight (and any stray OPTIONS) -> just the CORS headers.
-export function onRequestOptions() {
-  return new Response(null, { status: 204, headers: CORS });
+// ------------------------------------------------------------
+// Web Crypto primitives for SigV4
+// ------------------------------------------------------------
+
+const encoder = new TextEncoder();
+
+// Lowercase hex encoding of a byte buffer (SigV4 expects lowercase hex).
+function toHex(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    out += bytes[i].toString(16).padStart(2, '0');
+  }
+  return out;
 }
 
-export async function onRequestGet(context) {
-  const { env, params, request } = context;
-  const token = params.token;
+// SHA-256 of a string -> lowercase hex digest.
+async function sha256Hex(message) {
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(message));
+  return toHex(digest);
+}
 
-  if (!token) return json({ error: 'Missing share token.' }, 400);
+// HMAC-SHA256(key, message) -> raw bytes (ArrayBuffer).
+// `key` may be either an ArrayBuffer/Uint8Array (from a previous round) or a
+// string (the initial "AWS4" + secret). We normalize to bytes before importing.
+async function hmac(key, message) {
+  const keyBytes = typeof key === 'string' ? encoder.encode(key) : key;
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    keyBytes,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  return crypto.subtle.sign('HMAC', cryptoKey, encoder.encode(message));
+}
 
-  // Service-role client — bypasses RLS. The token is the authorization,
-  // so we are careful to only return what the token points at.
-  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+// Derive the SigV4 signing key:
+//   kDate    = HMAC("AWS4" + secret, date)
+//   kRegion  = HMAC(kDate,   region)
+//   kService = HMAC(kRegion, service)
+//   kSigning = HMAC(kService,"aws4_request")
+// Each HMAC consumes the *raw bytes* of the previous one (a classic SigV4 gotcha).
+async function getSigningKey(secretKey, dateStamp, region, service) {
+  const kDate = await hmac('AWS4' + secretKey, dateStamp);
+  const kRegion = await hmac(kDate, region);
+  const kService = await hmac(kRegion, service);
+  const kSigning = await hmac(kService, 'aws4_request');
+  return kSigning;
+}
 
-  // 1) Resolve the share link --------------------------------------
-  const { data: link, error: linkErr } = await supabase
-    .from('share_links')
-    .select('id, token, project_id, asset_id, can_comment, expires_at, created_at')
-    .eq('token', token)
-    .maybeSingle();
+// RFC-3986 encoding for query-string values. encodeURIComponent leaves
+// !'()* unescaped, but SigV4's canonical query string requires them escaped,
+// so we percent-encode those four extra characters by hand.
+function rfc3986(str) {
+  return encodeURIComponent(str).replace(
+    /[!'()*]/g,
+    (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase(),
+  );
+}
 
-  if (linkErr) return json({ error: 'Lookup failed.' }, 500);
-  if (!link) return json({ error: 'Share link not found.' }, 404);
+// Encode an object-key path for the canonical URI. Each "/" separates path
+// segments and must stay literal; everything inside a segment is rfc3986-encoded.
+function encodeKeyPath(key) {
+  return key
+    .split('/')
+    .map((segment) => rfc3986(segment))
+    .join('/');
+}
 
-  // Expired?  (expires_at is optional; null = never expires)
-  if (link.expires_at && new Date(link.expires_at).getTime() < Date.now()) {
-    return json({ error: 'This share link has expired.' }, 410);
+// ------------------------------------------------------------
+// CORS preflight
+// ------------------------------------------------------------
+export async function onRequestOptions() {
+  // 204 No Content with the CORS headers satisfies the browser preflight.
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
+}
+
+// ------------------------------------------------------------
+// POST /api/upload-url
+// ------------------------------------------------------------
+export async function onRequestPost(context) {
+  const { request, env } = context;
+
+  // --- 1) Parse and validate the request body ----------------
+  let payload;
+  try {
+    payload = await request.json();
+  } catch {
+    return json({ error: 'Invalid JSON body' }, 400);
+  }
+  const { filename, contentType, size, projectId } = payload || {};
+  if (!filename || typeof filename !== 'string') return json({ error: 'filename is required' }, 400);
+  if (!projectId || typeof projectId !== 'string') return json({ error: 'projectId is required' }, 400);
+
+  // Bind the byte length so a presigned URL can't be reused for a bigger file.
+  // Single-PUT to R2 is capped at ~5 GiB; larger files need multipart (Phase 3).
+  const MAX_SINGLE_PUT = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024; // 4.995 GiB
+  const len = Number(size);
+  if (!Number.isFinite(len) || len <= 0) return json({ error: 'size (bytes) is required' }, 400);
+  if (len > MAX_SINGLE_PUT) {
+    return json({ error: 'File too large for a single upload (max ~5 GiB). Multipart upload is required for bigger files.' }, 413);
   }
 
-  // Password-protected? Verify against the bcrypt hash INSIDE Postgres via the
-  // verify_share() RPC (it returns true when no password is set), so the hash
-  // never enters this function. The password is read from the `x-share-password`
-  // header rather than the URL query, keeping it out of access logs.
-  {
-    const pw = request.headers.get('x-share-password')
-      || new URL(request.url).searchParams.get('pw'); // legacy fallback
-    const { data: ok, error: vErr } = await supabase.rpc('verify_share', { p_token: token, p_pw: pw });
-    if (vErr) return json({ error: 'Password check failed.' }, 500);
-    if (ok !== true) return json({ error: 'Password required or incorrect.' }, 401);
+  // Allowlist the MIME type — only images and video may be stored & served.
+  const ct = String(contentType || '');
+  if (!/^image\//.test(ct) && !/^video\//.test(ct)) {
+    return json({ error: 'Only image/* and video/* uploads are allowed' }, 415);
   }
 
-  // What the public viewer is allowed to know about the link itself
-  // (NEVER leak the password).
-  const share = {
-    token: link.token,
-    can_comment: !!link.can_comment,
-    scope: link.asset_id ? 'asset' : 'project',
-    created_at: link.created_at,
-  };
+  // --- 2) Verify the Supabase JWT AND authorize the project --
+  // The client sends `Authorization: Bearer <access_token>`. We (a) confirm the
+  // token is valid, then (b) confirm the user is a MEMBER of projectId's
+  // workspace by querying as that user — RLS only returns the project row if
+  // they belong to it, so a non-member gets [] -> 403. Everything fails CLOSED.
+  const authHeader = request.headers.get('Authorization') || '';
+  if (!authHeader.startsWith('Bearer ')) return json({ error: 'Missing bearer token' }, 401);
+  let workspaceId;
+  try {
+    const userResp = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, {
+      headers: { apikey: env.SUPABASE_ANON_KEY, Authorization: authHeader },
+    });
+    if (!userResp.ok) return json({ error: 'Unauthorized' }, 401);
 
-  // 2) Decide the set of assets in scope ---------------------------
-  // An asset link exposes exactly one asset; a project link exposes
-  // every asset in the project.
-  let project = null;
-  let assets = [];
-
-  if (link.asset_id) {
-    const { data: asset, error: aErr } = await supabase
-      .from('assets')
-      .select('id, project_id, title, status, created_at')
-      .eq('id', link.asset_id)
-      .maybeSingle();
-    if (aErr) return json({ error: 'Could not load asset.' }, 500);
-    if (!asset) return json({ error: 'Shared asset no longer exists.' }, 404);
-    assets = [asset];
-
-    // Include the parent project as light context (name/color only).
-    const { data: proj } = await supabase
-      .from('projects')
-      .select('id, name, color, created_at')
-      .eq('id', asset.project_id)
-      .maybeSingle();
-    project = proj || null;
-  } else if (link.project_id) {
-    const { data: proj, error: pErr } = await supabase
-      .from('projects')
-      .select('id, name, color, created_at')
-      .eq('id', link.project_id)
-      .maybeSingle();
-    if (pErr) return json({ error: 'Could not load project.' }, 500);
-    if (!proj) return json({ error: 'Shared project no longer exists.' }, 404);
-    project = proj;
-
-    const { data: rows, error: asErr } = await supabase
-      .from('assets')
-      .select('id, project_id, title, status, created_at')
-      .eq('project_id', proj.id)
-      .order('created_at', { ascending: true });
-    if (asErr) return json({ error: 'Could not load assets.' }, 500);
-    assets = rows || [];
-  } else {
-    // A link that points at neither a project nor an asset is broken.
-    return json({ error: 'Share link is not attached to anything.' }, 404);
+    const projResp = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/projects?id=eq.${encodeURIComponent(projectId)}&select=workspace_id`,
+      { headers: { apikey: env.SUPABASE_ANON_KEY, Authorization: authHeader } },
+    );
+    const rows = projResp.ok ? await projResp.json() : [];
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return json({ error: 'Not a member of this project' }, 403);
+    }
+    workspaceId = rows[0].workspace_id;
+  } catch {
+    return json({ error: 'Auth check failed' }, 401); // fail closed on network error
   }
 
-  // 3) Walk down: versions for those assets, comments for those versions.
-  const assetIds = assets.map((a) => a.id);
+  // --- 3) Build a workspace-scoped, sanitized object key ------
+  // Prefix with the workspace id (for attribution / lifecycle rules) and a UUID
+  // so two users uploading "final.mp4" never clobber each other.
+  const safeName = filename.replace(/[^\w.-]+/g, '_').slice(0, 120);
+  const key = `ws/${workspaceId}/${crypto.randomUUID()}-${safeName}`;
 
-  let versions = [];
-  if (assetIds.length) {
-    const { data: vRows, error: vErr } = await supabase
-      .from('versions')
-      .select('id, asset_id, label, kind, r2_key, stream_uid, mux_playback_id, duration, created_at')
-      .in('asset_id', assetIds)
-      .order('created_at', { ascending: true });
-    if (vErr) return json({ error: 'Could not load versions.' }, 500);
-    versions = vRows || [];
-  }
+  // --- 4) AWS SigV4 query-string presign for an R2 PUT -------
+  const region = 'auto';
+  const service = 's3';
+  const host = `${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+  // Path-style addressing: /<bucket>/<key>. The bucket name is a literal path
+  // segment; the key gets per-segment RFC-3986 encoding.
+  const canonicalUri = `/${env.R2_BUCKET}/${encodeKeyPath(key)}`;
 
-  const versionIds = versions.map((v) => v.id);
+  // SigV4 timestamps: amzDate = YYYYMMDDTHHMMSSZ, dateStamp = YYYYMMDD (UTC).
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, ''); // 20260621T010203Z
+  const dateStamp = amzDate.slice(0, 8); // 20260621
 
-  let comments = [];
-  if (versionIds.length) {
-    const { data: cRows, error: cErr } = await supabase
-      .from('comments')
-      .select('id, version_id, author, guest_name, body, t, in_a, in_b, point_x, point_y, drawing, resolved, created_at')
-      .in('version_id', versionIds)
-      .order('created_at', { ascending: true });
-    if (cErr) return json({ error: 'Could not load comments.' }, 500);
-    comments = cRows || [];
-  }
+  const expires = 3600; // URL valid for 1 hour
+  const algorithm = 'AWS4-HMAC-SHA256';
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
 
-  // 4) Assemble the nested payload the viewer renders --------------
-  //    project -> assets[] -> versions[] -> comments[]
-  const versionsByAsset = new Map();
-  for (const v of versions) {
-    if (!versionsByAsset.has(v.asset_id)) versionsByAsset.set(v.asset_id, []);
-    versionsByAsset.get(v.asset_id).push({ ...v, comments: [] });
-  }
-  const commentTargets = new Map(); // version_id -> that version's comments array
-  for (const list of versionsByAsset.values()) {
-    for (const v of list) commentTargets.set(v.id, v.comments);
-  }
-  for (const c of comments) {
-    const target = commentTargets.get(c.version_id);
-    if (target) target.push(c);
-  }
+  // For a presigned URL the auth material rides in the query string. We sign
+  // host + content-length + content-type, so the eventual PUT is bound to the
+  // EXACT byte length and MIME type we authorized (a member can't reuse the URL
+  // for a bigger or different-typed file). Payload stays UNSIGNED so the browser
+  // streams the body without us hashing gigabytes. Names lowercased + sorted.
+  const signedHeaders = 'content-length;content-type;host';
 
-  const assetsOut = assets.map((a) => ({
-    ...a,
-    versions: versionsByAsset.get(a.id) || [],
-  }));
+  // Build the canonical query string. These params MUST be:
+  //   - URI-encoded (key and value),
+  //   - sorted by encoded key name (byte order).
+  // We assemble as [encKey, encVal] pairs, sort by encKey, then join.
+  const queryParams = [
+    ['X-Amz-Algorithm', algorithm],
+    ['X-Amz-Credential', `${env.R2_ACCESS_KEY_ID}/${credentialScope}`],
+    ['X-Amz-Date', amzDate],
+    ['X-Amz-Expires', String(expires)],
+    ['X-Amz-SignedHeaders', signedHeaders],
+  ];
+  const canonicalQueryString = queryParams
+    .map(([k, v]) => [rfc3986(k), rfc3986(v)])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([k, v]) => `${k}=${v}`)
+    .join('&');
 
-  return json({ share, project, assets: assetsOut });
+  // Canonical headers block: one "name:value\n" line per signed header, with
+  // names lowercased, values trimmed, and lines sorted by header name.
+  const canonicalHeaders =
+    `content-length:${len}\n` +
+    `content-type:${ct}\n` +
+    `host:${host}\n`;
+
+  // Canonical request:
+  //   METHOD \n URI \n QUERY \n CANONICAL_HEADERS \n SIGNED_HEADERS \n PAYLOAD_HASH
+  // Payload hash literal is "UNSIGNED-PAYLOAD" for presigned PUTs.
+  const payloadHash = 'UNSIGNED-PAYLOAD';
+  const canonicalRequest = [
+    'PUT',
+    canonicalUri,
+    canonicalQueryString,
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash,
+  ].join('\n');
+
+  // String to sign:
+  //   ALGORITHM \n AMZ_DATE \n CREDENTIAL_SCOPE \n hex(SHA256(canonicalRequest))
+  const hashedCanonicalRequest = await sha256Hex(canonicalRequest);
+  const stringToSign = [
+    algorithm,
+    amzDate,
+    credentialScope,
+    hashedCanonicalRequest,
+  ].join('\n');
+
+  // Signature = hex( HMAC( signingKey, stringToSign ) )
+  const signingKey = await getSigningKey(
+    env.R2_SECRET_ACCESS_KEY,
+    dateStamp,
+    region,
+    service,
+  );
+  const signature = toHex(await hmac(signingKey, stringToSign));
+
+  // Final presigned URL = endpoint + canonical query + the computed signature.
+  // X-Amz-Signature is appended AFTER signing (it is never part of the signed
+  // canonical query string).
+  const uploadUrl =
+    `https://${host}${canonicalUri}?${canonicalQueryString}` +
+    `&X-Amz-Signature=${signature}`;
+
+  // Public URL the app stores as versions.r2_key's served location. We keep
+  // `key` itself in the DB; publicUrl is the convenience CDN/public-bucket URL.
+  const publicUrl = env.R2_PUBLIC_BASE.replace(/\/$/, '') + '/' + key;
+
+  // The browser's PUT MUST send exactly this Content-Type and a body of exactly
+  // `len` bytes (the browser sets Content-Length automatically from the File),
+  // since both are now part of the signature. We echo them back for clarity.
+  return json({ uploadUrl, key, publicUrl, contentType: ct, size: len });
 }
