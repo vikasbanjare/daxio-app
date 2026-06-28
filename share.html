@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Shared review — Daxio</title>
+<meta name="robots" content="noindex" />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="app.css" />
+<script src="config.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <span class="brand"><span class="logo" aria-hidden="true"></span><span>Daxio</span></span>
+  <span id="shareScope" class="ws-name"></span>
+</header>
+
+<div id="pwGate" class="screen-center" hidden>
+  <form id="pwForm" class="auth-card">
+    <div class="brand" style="justify-content:center"><span class="logo" aria-hidden="true"></span><span>Protected review</span></div>
+    <p class="auth-sub">This link needs a password.</p>
+    <input id="pw" type="password" placeholder="Password" aria-label="Password" />
+    <button class="btn btn-primary" type="submit" style="margin-top:10px">Open</button>
+    <p id="pwMsg" class="auth-msg err" hidden></p>
+  </form>
+</div>
+
+<div id="loading" class="screen-center"><div class="spinner" aria-hidden="true"></div></div>
+<div id="error" class="screen-center" hidden><div class="empty"><h3 id="errH">Link unavailable</h3><p id="errP"></p></div></div>
+
+<div id="viewer" class="review" style="position:static;min-height:calc(100vh - 58px)" hidden>
+  <div class="review-head">
+    <span id="viewerTitle" class="review-title"></span>
+    <select id="viewerVersion" class="vsel" aria-label="Version"></select>
+  </div>
+  <div class="review-body">
+    <div id="stage" class="stage"></div>
+    <aside class="comments"><div id="commentList" class="comment-list"></div>
+      <div class="composer"><p style="font-size:12px;color:var(--muted);margin:0">Sign in to the workspace to reply. (Guest commenting is coming next.)</p></div>
+    </aside>
+  </div>
+</div>
+
+<script type="module" src="share.js"></script>
+</body>
+</html>

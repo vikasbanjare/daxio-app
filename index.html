@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Daxio — Review</title>
+<meta name="description" content="Daxio — frame-accurate creative review for video teams." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="app.css" />
+<!-- Your public Supabase config (create config.js and fill in your values). -->
+<script src="config.js"></script>
+</head>
+<body>
+
+<!-- Loading -->
+<div id="loading" class="screen-center"><div class="spinner" aria-hidden="true"></div></div>
+
+<!-- Sign in -->
+<section id="signin" class="screen-center" hidden>
+  <div class="auth-card">
+    <div class="brand brand-lg"><span class="logo" aria-hidden="true"></span><span>Daxio</span></div>
+    <p class="auth-sub">Sign in to review, comment, and approve.</p>
+    <button class="btn btn-oauth" data-oauth="google"><span class="g">G</span> Continue with Google</button>
+    <button class="btn btn-oauth" data-oauth="azure"><span class="m">⊞</span> Continue with Microsoft</button>
+    <div class="divider"><span>or</span></div>
+    <form id="emailForm">
+      <input id="email" type="email" required placeholder="you@studio.com" aria-label="Email" />
+      <button class="btn btn-primary" type="submit">Email me a magic link</button>
+    </form>
+    <p id="authMsg" class="auth-msg" hidden></p>
+  </div>
+</section>
+
+<!-- App -->
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="tb-left">
+      <span class="brand"><span class="logo" aria-hidden="true"></span><span>Daxio</span></span>
+      <span id="wsName" class="ws-name"></span>
+    </div>
+    <div class="tb-right">
+      <span id="userChip" class="user-chip"></span>
+      <button id="signOut" class="btn btn-ghost btn-sm">Sign out</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="side-head">Projects <button id="newProject" class="icon-add" aria-label="New project">+</button></div>
+      <ul id="projectList" class="project-list"></ul>
+    </aside>
+
+    <main class="main">
+      <div class="main-head">
+        <h1 id="projectTitle">—</h1>
+        <label class="btn btn-primary upbtn">+ New review<input id="fileInput" type="file" accept="image/*,video/*" hidden /></label>
+      </div>
+      <div id="uploadBar" class="upload-bar" hidden><div class="up-label" id="upLabel"></div><div class="up-track"><div id="upFill" class="up-fill"></div></div></div>
+      <div id="assetGrid" class="grid"></div>
+      <div id="emptyState" class="empty" hidden></div>
+    </main>
+  </div>
+
+  <!-- Review overlay -->
+  <div id="review" class="review" hidden>
+    <div class="review-head">
+      <button id="reviewBack" class="btn btn-ghost btn-sm">← Back</button>
+      <span id="reviewTitle" class="review-title"></span>
+      <div class="review-actions">
+        <select id="versionSelect" class="vsel" aria-label="Version"></select>
+        <button id="shareBtn" class="btn btn-soft btn-sm">Share link</button>
+      </div>
+    </div>
+    <div class="review-body">
+      <div id="stage" class="stage"></div>
+      <aside class="comments">
+        <div id="commentList" class="comment-list"></div>
+        <div class="composer">
+          <span id="stampChip" class="stamp" hidden></span>
+          <textarea id="commentInput" rows="2" placeholder="Leave a comment…"></textarea>
+          <button id="postBtn" class="btn btn-primary btn-sm" disabled>Comment</button>
+        </div>
+      </aside>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
