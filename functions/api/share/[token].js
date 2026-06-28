@@ -4,25 +4,14 @@
 // A Cloudflare Pages Function that lets an *anonymous* (no-account)
 // viewer open a project or a single asset that a team member shared.
 //
-// Flow:
-//   1. Look up share_links by the token in the URL.
-//        - not found            -> 404
-//        - expired (expires_at) -> 410
-//        - password set & ?pw=  -> must match, else 401
-//   2. Using the SERVICE ROLE key (which bypasses Row-Level Security),
-//      load the linked project (or asset) and walk down to its
-//      assets -> versions -> comments, and return ONE JSON payload the
-//      external review page can render.
-//
-// Why the service role is safe here: RLS would normally hide these rows
-// from an anonymous request, but the share token *is* the authorization —
-// we only ever return the exact project/asset the token points at, and we
-// strip the password before sending anything back.
-//
-// Runs on the Cloudflare Workers runtime — Web standards only, no Node.
+// ZERO dependencies: the Cloudflare Workers runtime cannot import
+// modules from a URL (e.g. esm.sh), so instead of the supabase-js
+// client we talk to Supabase directly over its REST API with plain
+// fetch, using the SERVICE ROLE key (which bypasses Row-Level
+// Security). The share token is the authorization — we only ever
+// return the exact project/asset the token points at, and we never
+// leak the password.
 // ============================================================
-
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 // Permissive, read-only CORS so the share page can be hosted anywhere.
 const CORS = {
@@ -51,20 +40,32 @@ export async function onRequestGet(context) {
 
   if (!token) return json({ error: 'Missing share token.' }, 400);
 
-  // Service-role client — bypasses RLS. The token is the authorization,
-  // so we are careful to only return what the token points at.
-  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
+  // Supabase REST base + service-role auth headers (bypasses RLS).
+  const base = env.SUPABASE_URL.replace(/\/$/, '') + '/rest/v1';
+  const headers = {
+    apikey: env.SUPABASE_SERVICE_ROLE,
+    Authorization: 'Bearer ' + env.SUPABASE_SERVICE_ROLE,
+    'Content-Type': 'application/json',
+  };
+
+  // Helper: GET rows from PostgREST with a raw query string.
+  async function sel(path) {
+    const r = await fetch(base + path, { headers });
+    if (!r.ok) throw new Error('db ' + r.status);
+    return r.json();
+  }
 
   // 1) Resolve the share link --------------------------------------
-  const { data: link, error: linkErr } = await supabase
-    .from('share_links')
-    .select('id, token, project_id, asset_id, can_comment, expires_at, created_at')
-    .eq('token', token)
-    .maybeSingle();
-
-  if (linkErr) return json({ error: 'Lookup failed.' }, 500);
+  let link;
+  try {
+    const rows = await sel(
+      `/share_links?token=eq.${encodeURIComponent(token)}` +
+      `&select=id,token,project_id,asset_id,can_comment,expires_at,created_at`
+    );
+    link = rows[0];
+  } catch {
+    return json({ error: 'Lookup failed.' }, 500);
+  }
   if (!link) return json({ error: 'Share link not found.' }, 404);
 
   // Expired?  (expires_at is optional; null = never expires)
@@ -72,20 +73,29 @@ export async function onRequestGet(context) {
     return json({ error: 'This share link has expired.' }, 410);
   }
 
-  // Password-protected? Verify against the bcrypt hash INSIDE Postgres via the
-  // verify_share() RPC (it returns true when no password is set), so the hash
-  // never enters this function. The password is read from the `x-share-password`
-  // header rather than the URL query, keeping it out of access logs.
+  // Password-protected? Verify against the hash INSIDE Postgres via the
+  // verify_share() RPC (returns true when no password is set), so the hash
+  // never enters this function. Password is read from the x-share-password
+  // header (kept out of access logs), with a legacy ?pw= fallback.
   {
     const pw = request.headers.get('x-share-password')
-      || new URL(request.url).searchParams.get('pw'); // legacy fallback
-    const { data: ok, error: vErr } = await supabase.rpc('verify_share', { p_token: token, p_pw: pw });
-    if (vErr) return json({ error: 'Password check failed.' }, 500);
+      || new URL(request.url).searchParams.get('pw');
+    let ok = false;
+    try {
+      const r = await fetch(base + '/rpc/verify_share', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ p_token: token, p_pw: pw }),
+      });
+      if (!r.ok) return json({ error: 'Password check failed.' }, 500);
+      ok = await r.json(); // the function returns a boolean
+    } catch {
+      return json({ error: 'Password check failed.' }, 500);
+    }
     if (ok !== true) return json({ error: 'Password required or incorrect.' }, 401);
   }
 
-  // What the public viewer is allowed to know about the link itself
-  // (NEVER leak the password).
+  // What the public viewer may know about the link (NEVER the password).
   const share = {
     token: link.token,
     can_comment: !!link.can_comment,
@@ -94,79 +104,59 @@ export async function onRequestGet(context) {
   };
 
   // 2) Decide the set of assets in scope ---------------------------
-  // An asset link exposes exactly one asset; a project link exposes
-  // every asset in the project.
   let project = null;
   let assets = [];
-
-  if (link.asset_id) {
-    const { data: asset, error: aErr } = await supabase
-      .from('assets')
-      .select('id, project_id, title, status, created_at')
-      .eq('id', link.asset_id)
-      .maybeSingle();
-    if (aErr) return json({ error: 'Could not load asset.' }, 500);
-    if (!asset) return json({ error: 'Shared asset no longer exists.' }, 404);
-    assets = [asset];
-
-    // Include the parent project as light context (name/color only).
-    const { data: proj } = await supabase
-      .from('projects')
-      .select('id, name, color, created_at')
-      .eq('id', asset.project_id)
-      .maybeSingle();
-    project = proj || null;
-  } else if (link.project_id) {
-    const { data: proj, error: pErr } = await supabase
-      .from('projects')
-      .select('id, name, color, created_at')
-      .eq('id', link.project_id)
-      .maybeSingle();
-    if (pErr) return json({ error: 'Could not load project.' }, 500);
-    if (!proj) return json({ error: 'Shared project no longer exists.' }, 404);
-    project = proj;
-
-    const { data: rows, error: asErr } = await supabase
-      .from('assets')
-      .select('id, project_id, title, status, created_at')
-      .eq('project_id', proj.id)
-      .order('created_at', { ascending: true });
-    if (asErr) return json({ error: 'Could not load assets.' }, 500);
-    assets = rows || [];
-  } else {
-    // A link that points at neither a project nor an asset is broken.
-    return json({ error: 'Share link is not attached to anything.' }, 404);
+  try {
+    if (link.asset_id) {
+      const a = (await sel(
+        `/assets?id=eq.${link.asset_id}&select=id,project_id,title,status,created_at`
+      ))[0];
+      if (!a) return json({ error: 'Shared asset no longer exists.' }, 404);
+      assets = [a];
+      project = (await sel(
+        `/projects?id=eq.${a.project_id}&select=id,name,color,created_at`
+      ))[0] || null;
+    } else if (link.project_id) {
+      project = (await sel(
+        `/projects?id=eq.${link.project_id}&select=id,name,color,created_at`
+      ))[0];
+      if (!project) return json({ error: 'Shared project no longer exists.' }, 404);
+      assets = await sel(
+        `/assets?project_id=eq.${project.id}` +
+        `&select=id,project_id,title,status,created_at&order=created_at.asc`
+      );
+    } else {
+      return json({ error: 'Share link is not attached to anything.' }, 404);
+    }
+  } catch {
+    return json({ error: 'Could not load shared content.' }, 500);
   }
 
   // 3) Walk down: versions for those assets, comments for those versions.
   const assetIds = assets.map((a) => a.id);
-
   let versions = [];
-  if (assetIds.length) {
-    const { data: vRows, error: vErr } = await supabase
-      .from('versions')
-      .select('id, asset_id, label, kind, r2_key, stream_uid, mux_playback_id, duration, created_at')
-      .in('asset_id', assetIds)
-      .order('created_at', { ascending: true });
-    if (vErr) return json({ error: 'Could not load versions.' }, 500);
-    versions = vRows || [];
-  }
-
-  const versionIds = versions.map((v) => v.id);
-
   let comments = [];
-  if (versionIds.length) {
-    const { data: cRows, error: cErr } = await supabase
-      .from('comments')
-      .select('id, version_id, author, guest_name, body, t, in_a, in_b, point_x, point_y, drawing, resolved, created_at')
-      .in('version_id', versionIds)
-      .order('created_at', { ascending: true });
-    if (cErr) return json({ error: 'Could not load comments.' }, 500);
-    comments = cRows || [];
+  try {
+    if (assetIds.length) {
+      versions = await sel(
+        `/versions?asset_id=in.(${assetIds.join(',')})` +
+        `&select=id,asset_id,label,kind,r2_key,stream_uid,mux_playback_id,duration,created_at` +
+        `&order=created_at.asc`
+      );
+    }
+    const versionIds = versions.map((v) => v.id);
+    if (versionIds.length) {
+      comments = await sel(
+        `/comments?version_id=in.(${versionIds.join(',')})` +
+        `&select=id,version_id,author,guest_name,body,t,in_a,in_b,point_x,point_y,drawing,resolved,created_at` +
+        `&order=created_at.asc`
+      );
+    }
+  } catch {
+    return json({ error: 'Could not load versions/comments.' }, 500);
   }
 
-  // 4) Assemble the nested payload the viewer renders --------------
-  //    project -> assets[] -> versions[] -> comments[]
+  // 4) Assemble the nested payload: project -> assets[] -> versions[] -> comments[]
   const versionsByAsset = new Map();
   for (const v of versions) {
     if (!versionsByAsset.has(v.asset_id)) versionsByAsset.set(v.asset_id, []);
