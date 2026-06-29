@@ -1,94 +1,200 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Daxio — Review</title>
-<meta name="description" content="Daxio — frame-accurate creative review for video teams." />
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Daxio — review every frame</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="app.css" />
-<!-- Your public Supabase config (create config.js and fill in your values). -->
-<script src="config.js"></script>
+<style>
+  .auth-overlay{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;background:var(--bg,#0A0A0E);padding:24px;}
+  .auth-card{width:100%;max-width:360px;text-align:center;background:var(--panel,#15161C);border:1px solid var(--line,rgba(255,255,255,.08));border-radius:14px;padding:34px 30px;box-shadow:0 20px 50px -20px rgba(0,0,0,.6);}
+  .auth-card .brand{justify-content:center;margin-bottom:8px;gap:10px;}
+  .auth-card .brand-name{font-size:24px;font-weight:800;}
+  .auth-sub{color:var(--ink-2,#AEB4C0);font-size:14px;margin:0 0 22px;}
+  .auth-card .btn{width:100%;margin-bottom:10px;justify-content:center;}
+  .auth-or{display:flex;align-items:center;gap:12px;color:var(--muted,#8C93A4);font-size:12px;margin:14px 0;}
+  .auth-or::before,.auth-or::after{content:"";flex:1;height:1px;background:var(--line,rgba(255,255,255,.1));}
+  .auth-form{display:flex;flex-direction:column;gap:10px;}
+  .auth-form input{height:42px;border:1px solid var(--line-2,rgba(255,255,255,.14));background:var(--bg,#0A0A0E);color:var(--ink,#F3F4F7);border-radius:9px;padding:0 14px;font-size:14px;outline:none;}
+  .auth-form input:focus{border-color:var(--accent,#F94B1E);}
+  .auth-msg{margin-top:14px;font-size:13px;color:var(--accent-2,#FF7A33);}
+  .auth-msg.err{color:#FF5C5C;}
+  .auth-spinner{width:34px;height:34px;border-radius:50%;border:3px solid rgba(255,255,255,.14);border-top-color:var(--accent,#4F6EF0);animation:auth-spin .8s linear infinite;}
+  @keyframes auth-spin{to{transform:rotate(360deg)}}
+  /* Use the real Daxio logo mark instead of the placeholder square */
+  .brand-mark{background:url(logo-mark.svg) center/contain no-repeat !important;box-shadow:none !important;border-radius:0 !important;width:44px !important;height:26px !important;}
+  .brand-mark::after,.brand-mark::before{content:none !important;display:none !important;}
+  .auth-card .brand-mark{width:66px !important;height:38px !important;}
+  /* compact icon-only shape tool buttons */
+  .tool-btn.icon-only{padding:7px !important;gap:0 !important;}
+  .tool-btn.icon-only svg{width:17px;height:17px;margin:0;}
+</style>
 </head>
 <body>
 
-<!-- Loading -->
-<div id="loading" class="screen-center"><div class="spinner" aria-hidden="true"></div></div>
-
-<!-- Sign in -->
-<section id="signin" class="screen-center" hidden>
-  <div class="auth-card">
-    <div class="brand brand-lg"><span class="logo" aria-hidden="true"></span><span>Daxio</span></div>
-    <p class="auth-sub">Sign in to review, comment, and approve.</p>
-    <button class="btn btn-oauth" data-oauth="google"><span class="g">G</span> Continue with Google</button>
-    <button class="btn btn-oauth" data-oauth="azure"><span class="m">⊞</span> Continue with Microsoft</button>
-    <div class="divider"><span>or</span></div>
-    <form id="emailForm">
-      <input id="email" type="email" required placeholder="you@studio.com" aria-label="Email" />
-      <button class="btn btn-primary" type="submit">Email me a magic link</button>
-    </form>
-    <p id="authMsg" class="auth-msg" hidden></p>
+<header class="topbar">
+  <div class="tb-left">
+    <button id="backBtn" class="icon-btn" hidden aria-label="Back"></button>
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">Daxio</span></div>
+    <span id="crumb" class="crumb"></span>
   </div>
-</section>
-
-<!-- App -->
-<div id="app" hidden>
-  <header class="topbar">
-    <div class="tb-left">
-      <span class="brand"><span class="logo" aria-hidden="true"></span><span>Daxio</span></span>
-      <span id="wsName" class="ws-name"></span>
+  <div class="tb-right">
+    <div id="presence" class="presence" hidden></div>
+    <div id="reviewActions" class="review-actions" hidden>
+      <span id="statusBadge" class="status-badge"></span>
+      <button id="shareBtn" class="btn btn-ghost"></button>
+      <button id="requestBtn" class="btn btn-soft"></button>
+      <button id="approveBtn" class="btn btn-primary"></button>
     </div>
-    <div class="tb-right">
-      <span id="userChip" class="user-chip"></span>
-      <button id="signOut" class="btn btn-ghost btn-sm">Sign out</button>
+    <button id="newBtn" class="btn btn-primary"></button>
+    <div class="user-wrap">
+      <button id="userBtn" class="avatar-btn" aria-haspopup="true" aria-expanded="false" aria-label="Account menu"></button>
+      <div id="userMenu" class="menu" hidden></div>
     </div>
-  </header>
-
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="side-head">Projects <button id="newProject" class="icon-add" aria-label="New project">+</button></div>
-      <ul id="projectList" class="project-list"></ul>
-    </aside>
-
-    <main class="main">
-      <div class="main-head">
-        <h1 id="projectTitle">—</h1>
-        <label class="btn btn-primary upbtn">+ New review<input id="fileInput" type="file" accept="image/*,video/*" hidden /></label>
-      </div>
-      <div id="uploadBar" class="upload-bar" hidden><div class="up-label" id="upLabel"></div><div class="up-track"><div id="upFill" class="up-fill"></div></div></div>
-      <div id="assetGrid" class="grid"></div>
-      <div id="emptyState" class="empty" hidden></div>
-    </main>
   </div>
+</header>
 
-  <!-- Review overlay -->
-  <div id="review" class="review" hidden>
-    <div class="review-head">
-      <button id="reviewBack" class="btn btn-ghost btn-sm">← Back</button>
-      <span id="reviewTitle" class="review-title"></span>
-      <div class="review-actions">
-        <select id="versionSelect" class="vsel" aria-label="Version"></select>
-        <button id="shareBtn" class="btn btn-soft btn-sm">Share link</button>
-      </div>
+<!-- ============ Library ============ -->
+<main id="libraryView" class="view" aria-label="Reviews library">
+  <div class="lib-head">
+    <div><h1>Reviews</h1><p id="libSub" class="muted"></p></div>
+  </div>
+  <div class="lib-toolbar">
+    <div class="lib-search">
+      <span class="lib-search-ic" id="libSearchIc" aria-hidden="true"></span>
+      <input id="libSearch" type="search" placeholder="Search reviews…" aria-label="Search reviews" autocomplete="off" />
     </div>
-    <div class="review-body">
-      <div id="stage" class="stage"></div>
-      <aside class="comments">
-        <div id="commentList" class="comment-list"></div>
-        <div class="composer">
-          <span id="stampChip" class="stamp" hidden></span>
-          <textarea id="commentInput" rows="2" placeholder="Leave a comment…"></textarea>
+    <div id="libStatusFilter" class="lib-chips" role="group" aria-label="Filter by status"></div>
+    <div class="lib-tools-right">
+      <div class="lib-select">
+        <span class="lib-select-ic" id="libSortIc" aria-hidden="true"></span>
+        <select id="libSort" aria-label="Sort reviews">
+          <option value="recent">Newest</option>
+          <option value="oldest">Oldest</option>
+          <option value="name">Name A–Z</option>
+          <option value="status">Status</option>
+          <option value="open">Most open</option>
+        </select>
+      </div>
+      <button id="libGroup" class="chip-btn" aria-pressed="false" title="Group by status"></button>
+    </div>
+  </div>
+  <div id="libGrid" class="lib-grid"></div>
+  <div id="libEmpty" class="empty" hidden></div>
+</main>
+
+<!-- ============ Review ============ -->
+<main id="reviewView" class="view review" aria-label="Review" hidden>
+  <div class="rv-grid">
+    <section class="stage-col">
+      <div class="version-bar">
+        <div id="versionTabs" class="version-tabs"></div>
+        <div class="vbar-right">
+          <button id="snapBtn" class="chip-btn" title="Save the current frame as a PNG"></button>
+          <button id="compareBtn" class="chip-btn" hidden></button>
+          <label class="chip-btn" id="addVersionLabel"><input id="addVersionInput" type="file" accept="image/*,video/*" hidden /><span></span></label>
+        </div>
+      </div>
+
+      <div id="stageRow" class="stage-row">
+        <div class="stage-cell">
+          <div id="stage" class="stage"></div>
+        </div>
+        <div class="stage-cell" id="stage2Cell" hidden>
+          <div id="stage2" class="stage"></div>
+          <div class="stage2-label" id="stage2Label"></div>
+        </div>
+      </div>
+
+      <div id="controls" class="controls" hidden>
+        <div class="tl-row">
+          <div id="tlWrap" class="tl-wrap">
+            <div id="timeline" class="timeline" role="slider" tabindex="0" aria-label="Timeline" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0:00">
+              <div id="timeProgress" class="time-progress"></div>
+              <div id="markers" class="markers"></div>
+              <div id="playhead" class="playhead"><span class="ph-knob"></span></div>
+              <div id="timeHover" class="time-hover" hidden></div>
+            </div>
+          </div>
+        </div>
+        <div class="transport">
+          <button id="playBtn" class="ctl ctl-play" aria-label="Play / pause"></button>
+          <span id="timecode" class="timecode">0:00 / 0:00</span>
+          <span class="tr-spacer"></span>
+          <button id="frameBack" class="ctl" aria-label="Previous frame" title="Previous frame (,)"></button>
+          <button id="frameFwd" class="ctl" aria-label="Next frame" title="Next frame (.)"></button>
+          <button id="speedBtn" class="ctl ctl-text" aria-label="Playback speed">1×</button>
+          <button id="muteBtn" class="ctl" aria-label="Mute"></button>
+          <input id="volume" class="volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Volume" />
+          <span class="tr-div"></span>
+          <button id="zoomOut" class="ctl" aria-label="Zoom out timeline" title="Zoom out">−</button>
+          <span id="zoomLbl" class="zoom-lbl">1×</span>
+          <button id="zoomIn" class="ctl" aria-label="Zoom in timeline" title="Zoom in">+</button>
+          <button id="loopBtn" class="ctl" aria-label="Loop" title="Loop"></button>
+          <button id="fsBtn" class="ctl" aria-label="Fullscreen"></button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="comments-col">
+      <div class="comments-head">
+        <div id="filters" class="filters" role="group" aria-label="Filter comments"></div>
+        <button id="helpBtn" class="icon-btn" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)"></button>
+        <button id="threadSort" class="icon-btn" aria-label="Sort comments" title="Sort comments"></button>
+        <button id="exportBtn" class="icon-btn" aria-label="Export feedback" title="Export feedback"></button>
+      </div>
+      <div class="thread-search"><span class="ts-ic" id="threadSearchIc" aria-hidden="true"></span><input id="threadSearch" type="search" placeholder="Search comments…" aria-label="Search comments" autocomplete="off" /></div>
+      <div id="threadList" class="thread-list"></div>
+      <div class="composer">
+        <div class="composer-tools">
+          <span id="pinChip" class="pin-chip" hidden></span>
+          <button id="pinToggle" class="tool-btn" title="Pin a spot on the frame"></button>
+          <button id="drawToggle" class="tool-btn" title="Draw freehand on the frame"></button>
+          <button id="shape-rect" class="tool-btn icon-only" title="Box — drag on the frame"></button>
+          <button id="shape-arrow" class="tool-btn icon-only" title="Arrow — drag on the frame"></button>
+          <button id="shape-ellipse" class="tool-btn icon-only" title="Circle — drag on the frame"></button>
+          <button id="rangeToggle" class="tool-btn" title="Mark an in → out range"></button>
+        </div>
+        <div class="composer-box">
+          <textarea id="commentInput" rows="2" placeholder="Leave a comment… @ to mention"></textarea>
+          <div id="mentionMenu" class="mention-menu" hidden></div>
+        </div>
+        <div class="composer-foot">
+          <span class="hint">⌘/Ctrl + Enter</span>
           <button id="postBtn" class="btn btn-primary btn-sm" disabled>Comment</button>
         </div>
-      </aside>
-    </div>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<div id="modalRoot" class="modal-root" hidden>
+  <div class="modal-scrim" data-close></div>
+  <div id="modalCard" class="modal-card" role="dialog" aria-modal="true"></div>
+</div>
+<div id="toastHost" class="toast-host" aria-live="polite"></div>
+
+<!-- Auth: loading + sign-in (shown by app.js until signed in) -->
+<div id="authLoading" class="auth-overlay"><div class="auth-spinner" aria-hidden="true"></div></div>
+<div id="signinView" class="auth-overlay" hidden>
+  <div class="auth-card">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">Daxio</span></div>
+    <p class="auth-sub">Sign in to review, comment, and approve.</p>
+    <button class="btn btn-soft" data-oauth="google" type="button">Continue with Google</button>
+    <button class="btn btn-soft" data-oauth="azure" type="button">Continue with Microsoft</button>
+    <div class="auth-or">or</div>
+    <form id="signinEmailForm" class="auth-form">
+      <input id="signinEmail" type="email" required placeholder="you@studio.com" aria-label="Email" />
+      <button class="btn btn-primary" type="submit">Email me a magic link</button>
+    </form>
+    <p id="signinMsg" class="auth-msg" hidden></p>
   </div>
 </div>
 
-<div id="toast" class="toast" hidden></div>
-
-<script type="module" src="app.js"></script>
+<script src="config.js?v=3"></script>
+<script type="module" src="app.js?v=7"></script>
 </body>
 </html>
