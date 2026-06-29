@@ -31,6 +31,12 @@
   /* compact icon-only shape tool buttons */
   .tool-btn.icon-only{padding:7px !important;gap:0 !important;}
   .tool-btn.icon-only svg{width:17px;height:17px;margin:0;}
+  /* SHARE MODE (guest viewer, no account) — hide every editing affordance */
+  body.share-mode #backBtn, body.share-mode #newBtn, body.share-mode #presence,
+  body.share-mode #reviewActions, body.share-mode .user-wrap, body.share-mode #addVersionLabel,
+  body.share-mode .composer, body.share-mode .note-foot, body.share-mode #snapBtn { display:none !important; }
+  .share-badge{font-size:12px;font-weight:600;color:var(--accent-2,#7C93FF);background:var(--accent-soft,rgba(79,110,240,.16));padding:4px 10px;border-radius:999px;margin-left:6px;white-space:nowrap;}
+  body.share-mode #shareBadge{display:inline-block !important;}
 </style>
 </head>
 <body>
@@ -40,6 +46,7 @@
     <button id="backBtn" class="icon-btn" hidden aria-label="Back"></button>
     <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">Daxio</span></div>
     <span id="crumb" class="crumb"></span>
+    <span id="shareBadge" class="share-badge" hidden>Shared review · read-only</span>
   </div>
   <div class="tb-right">
     <div id="presence" class="presence" hidden></div>
@@ -176,6 +183,13 @@
   <div id="modalCard" class="modal-card" role="dialog" aria-modal="true"></div>
 </div>
 <div id="toastHost" class="toast-host" aria-live="polite"></div>
+<div id="shareError" class="auth-overlay" hidden>
+  <div class="auth-card">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">Daxio</span></div>
+    <p class="auth-sub" id="shareErrMsg">This shared link is unavailable.</p>
+    <a class="btn btn-primary" href="./" style="width:100%;justify-content:center;text-decoration:none">Go to Daxio</a>
+  </div>
+</div>
 
 <!-- Auth: loading + sign-in (shown by app.js until signed in) -->
 <div id="authLoading" class="auth-overlay"><div class="auth-spinner" aria-hidden="true"></div></div>
@@ -195,6 +209,6 @@
 </div>
 
 <script src="config.js?v=3"></script>
-<script type="module" src="app.js?v=7"></script>
+<script type="module" src="app.js?v=8"></script>
 </body>
 </html>

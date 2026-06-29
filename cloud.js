@@ -203,6 +203,28 @@ async function createShareLink(assetId) {
     .insert({ asset_id: assetId, can_comment: true, created_by: u.id }).select().single());
   return row.token;
 }
+// PUBLIC (no login): load a shared asset via the /api/share function, mapped to the
+// same in-memory shape the review UI uses, so the shared view reuses the rich player.
+async function loadShared(token) {
+  const r = await fetch(API + '/api/share/' + encodeURIComponent(token));
+  if (!r.ok) { const d = await r.text().catch(() => ''); throw new Error('share ' + r.status + (d ? ': ' + d : '')); }
+  const data = await r.json();
+  const parseDrawing = (dd) => { if (typeof dd === 'string') { try { dd = JSON.parse(dd); } catch (e) { dd = null; } } return (Array.isArray(dd) && dd.length) ? dd : null; };
+  const toC = (row) => ({
+    id: row.id, author: row.guest_name || 'Reviewer', body: row.body || '',
+    t: row.t,
+    inOut: (row.in_a != null) ? { a: row.in_a, b: row.in_b } : null,
+    point: (row.point_x != null) ? { x: row.point_x, y: row.point_y } : null,
+    drawing: parseDrawing(row.drawing),
+    reactions: {}, resolved: !!row.resolved, mentions: [], replies: [], createdAt: ts(row.created_at),
+  });
+  const assets = (data.assets || []).map((a) => {
+    let versions = (a.versions || []).map((v) => ({ id: v.id, label: v.label, kind: v.kind || null, r2_key: v.r2_key || null, dataURL: null, blobKey: null, duration: v.duration, comments: (v.comments || []).map(toC) }));
+    if (!versions.length) versions = [{ id: 'sv-' + a.id, label: 'V1', kind: null, r2_key: null, dataURL: null, blobKey: null, duration: null, comments: [] }];
+    return { id: a.id, title: a.title, status: a.status || 'In review', versions, activeVersionId: versions[versions.length - 1].id, createdAt: ts(a.created_at) };
+  });
+  return { project: data.project || null, assets, share: data.share || {} };
+}
 function subscribeComments(versionId, onChange) {
   const ch = supabase.channel('rev-comments:' + versionId)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'comments', filter: 'version_id=eq.' + versionId }, onChange)
@@ -216,5 +238,5 @@ window.Cloud = {
   createAsset, renameAsset, setAssetStatus, deleteAsset,
   addVersion, updateVersion, uploadFile, mediaUrl,
   addComment, setResolved, deleteComment, addReply, toggleReaction,
-  createShareLink, subscribeComments,
+  createShareLink, loadShared, subscribeComments,
 };

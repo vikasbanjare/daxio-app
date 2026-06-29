@@ -1,4 +1,4 @@
-import './cloud.js?v=5';   // sets window.Cloud (Supabase Auth + Postgres + Cloudflare R2)
+import './cloud.js?v=6';   // sets window.Cloud (Supabase Auth + Postgres + Cloudflare R2)
 /* ============================================================
    Daxio — Frame.io-style review, wired to a real backend.
    Data in Supabase (Postgres); media in Cloudflare R2.
@@ -148,10 +148,27 @@ function wireSignin(){
   const f=$('#signinEmailForm'); if(f)f.onsubmit=async e=>{ e.preventDefault(); const em=$('#signinEmail').value.trim(); if(!em)return; try{ await Cloud.signInEmail(em); signinMsg('Check your email for the magic link.',false); }catch(err){ signinMsg(err.message||'Could not send the link',true); } };
 }
 async function startApp(){ hideAuth(); await hydrate(); renderUser(); route(); }
+let SHARE=null;
+async function openShared(token){
+  document.body.classList.add('share-mode'); hideAuth();
+  try{
+    const data=await Cloud.loadShared(token);
+    SHARE={token:token, canComment:!!(data.share&&data.share.can_comment), project:data.project};
+    state.assets=data.assets||[];
+    if(!state.assets.length){ shareError('This shared review has nothing to show.'); return; }
+    openReview(state.assets[0].id,{});
+  }catch(e){ console.error('[Daxio] share load failed',e);
+    var s=String((e&&e.message)||e), msg='This shared link is unavailable.';
+    if(/410/.test(s))msg='This shared link has expired.'; else if(/404/.test(s))msg='This shared link was not found.'; else if(/401/.test(s))msg='This shared link is password-protected.';
+    shareError(msg); }
+}
+function shareError(msg){ const el=$('#shareError'); if(el){ const m=$('#shareErrMsg'); if(m)m.textContent=msg; el.hidden=false; } else { try{alert(msg);}catch(_){} } }
 (async function(){ await openDB();
   try{ const r=localStorage.getItem(LS); if(r){ const s=JSON.parse(r); if(s&&s.libView) state.libView=s.libView; } }catch(e){}
   wire(); wireSignin(); window.addEventListener('hashchange',route);
   if(!window.Cloud){ showSignin(); signinMsg('Backend not configured (check config.js).',true); return; }
+  // Public share links open WITHOUT sign-in (read-only viewer for clients/guests).
+  if(/^#\/share\//.test(location.hash||'')){ document.body.classList.add('share-mode'); hideAuth(); route(); return; }
   // NOTE: don't call Supabase methods synchronously inside the auth callback
   // (it holds an internal lock — doing so deadlocks getUser/queries). Defer with
   // setTimeout so workspace/project setup runs *after* the callback returns.
@@ -169,7 +186,9 @@ async function startApp(){ hideAuth(); await hydrate(); renderUser(); route(); }
   });
 })();
 
-function route(){ const m=(location.hash||'').match(/^#\/a\/([^/?]+)/);
+function route(){ const sm=(location.hash||'').match(/^#\/share\/([^/?]+)/);
+  if(sm){ openShared(decodeURIComponent(sm[1])); return; }
+  const m=(location.hash||'').match(/^#\/a\/([^/?]+)/);
   if(m&&asset(decodeURIComponent(m[1]))){ const q=new URLSearchParams((location.hash.split('?')[1]||'')); openReview(decodeURIComponent(m[1]),{v:q.get('v'),t:q.get('t')?+q.get('t'):null,c:q.get('c')}); }
   else showLibrary(); }
 
@@ -682,11 +701,16 @@ function sampleClip(a,v){ if(typeof MediaRecorder==='undefined'||!HTMLCanvasElem
 }
 
 /* ---------- share / export ---------- */
-function shareModal(a,v){ let url=location.origin+location.pathname+'#/a/'+encodeURIComponent(a.id)+'?v='+v.id; if(cur.mediaEl&&cur.mediaEl.tagName==='VIDEO')url+='&t='+Math.floor(cur.mediaEl.currentTime);
-  modal('Share for review',`<div class="field"><label>Review link</label><div class="share-link"><input id="shareUrl" value="${esc(url)}" readonly><button class="btn btn-primary" id="copyUrl">Copy</button></div></div>
-    <p class="muted">Anyone with the link can watch and comment. (In production: toggle password, expiry, and download — see INTEGRATION.md.)</p>`,
-    `<button class="btn btn-ghost" data-close>Done</button>`);
-  $('#copyUrl').onclick=()=>{const i=$('#shareUrl');i.select();copy(i.value);toast('Link copied');}; }
+async function shareModal(a,v){
+  const card=modal('Share for review',`<p class="muted" style="margin:0">Creating a public link…</p>`,`<button class="btn btn-ghost" data-close>Close</button>`);
+  try{
+    const token=await Cloud.createShareLink(a.id);
+    const url=location.origin+location.pathname+'#/share/'+token;
+    const body=$('.modal-body',card); if(body) body.innerHTML=`<div class="field"><label>Public review link</label><div class="share-link"><input id="shareUrl" value="${esc(url)}" readonly><button class="btn btn-primary" id="copyUrl">Copy</button></div></div>
+      <p class="muted">Anyone with this link can open the review and see the video plus all comments and markups — <strong>no account needed</strong>. (Guest commenting is coming next.)</p>`;
+    const cb=$('#copyUrl'); if(cb)cb.onclick=()=>{const i=$('#shareUrl');i.select();copy(i.value);toast('Link copied');};
+  }catch(e){ const body=$('.modal-body',card); if(body) body.innerHTML=`<p class="muted">Could not create the link: ${esc((e&&e.message)||String(e))}</p>`; }
+}
 function copy(t){ if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).catch(()=>fb()); else fb(); function fb(){const x=document.createElement('textarea');x.value=t;document.body.appendChild(x);x.select();try{document.execCommand('copy');}catch(e){}x.remove();} }
 /* ---------- export: turn comments into NLE timeline markers ---------- */
 function tc(sec,fps){ sec=Math.max(0,sec||0); var f=Math.round(sec*fps); var p=function(n){return String(n).padStart(2,'0');};
