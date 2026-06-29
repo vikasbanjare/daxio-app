@@ -135,6 +135,16 @@ async function loadAssets(projectId) {
   return out;
 }
 
+// Fresh comments for ONE version (used by the realtime subscription to refetch
+// after someone else adds / resolves / deletes a comment).
+async function loadVersionComments(versionId) {
+  const pm = await profileMap();
+  const crows = unwrap(await supabase.from('comments')
+    .select('*, comment_replies(*), comment_reactions(*)')
+    .eq('version_id', versionId).order('created_at', { ascending: true }));
+  return crows.map((c) => toComment(c, pm));
+}
+
 /* ---------------- assets ---------------- */
 async function createAsset(projectId, title) {
   const u = await getUser();
@@ -223,6 +233,7 @@ async function createShareLink(opts) {
   const ins = { can_comment: true, created_by: u.id };
   if (opts.projectId) ins.project_id = opts.projectId;
   else ins.asset_id = opts.assetId;
+  if (!ins.project_id && !ins.asset_id) throw new Error('Nothing to share — missing assetId or projectId.');
   const row = unwrap(await supabase.from('share_links').insert(ins).select().single());
   return row.token;
 }
@@ -257,7 +268,7 @@ function subscribeComments(versionId, onChange) {
 
 window.Cloud = {
   getUser, onAuth, signInEmail, signInOAuth, signOut, myName,
-  ensureProject, listProjects, createProject, loadAssets,
+  ensureProject, listProjects, createProject, loadAssets, loadVersionComments,
   createAsset, renameAsset, setAssetStatus, deleteAsset,
   addVersion, updateVersion, uploadFile, mediaUrl,
   addComment, setResolved, deleteComment, addReply, toggleReaction,

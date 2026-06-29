@@ -1,4 +1,4 @@
-import './cloud.js?v=9';   // sets window.Cloud (Supabase Auth + Postgres + Cloudflare R2)
+import './cloud.js?v=11';   // sets window.Cloud (Supabase Auth + Postgres + Cloudflare R2)
 /* ============================================================
    Daxio — Frame.io-style review, wired to a real backend.
    Data in Supabase (Postgres); media in Cloudflare R2.
@@ -130,7 +130,7 @@ function normalizeState(){
   });
   if(!state.currentUser) state.currentUser='You';
 }
-let PROJECT=null, PROJECTS=[], CUR_PROJECT=null;
+let PROJECT=null, PROJECTS=[], CUR_PROJECT=null, _projSeq=0;
 async function hydrate(){
   console.log('[Daxio] hydrate → ensureProject');
   PROJECT=await Cloud.ensureProject();
@@ -145,11 +145,16 @@ async function hydrate(){
 }
 /* ---------------- folders (projects) ---------------- */
 function renderProjSwitcher(){ const nm=$('#projName'); if(nm)nm.textContent=(CUR_PROJECT&&CUR_PROJECT.name)||'Reviews'; }
-async function switchProject(pid){ const p=PROJECTS.find(x=>x.id===pid); if(!p||p===CUR_PROJECT)return; CUR_PROJECT=p; renderProjSwitcher();
-  try{ state.assets=await Cloud.loadAssets(p.id); }catch(e){ state.assets=[]; toast('Could not open folder: '+((e&&e.message)||e),'error'); }
-  renderLibrary(); }
+function setLibLoading(){ const g=$('#libGrid'),e=$('#libEmpty'); if(e)e.hidden=true; if(g){ g.hidden=false; g.className='lib-grid'; g.innerHTML='<div class="lib-skel"></div>'.repeat(8); } }
+async function switchProject(pid){ const p=PROJECTS.find(x=>x.id===pid); if(!p||p===CUR_PROJECT)return; CUR_PROJECT=p; renderProjSwitcher(); setLibLoading();
+  const seq=++_projSeq;                 // guard against out-of-order loads from rapid clicks
+  let assets=[];
+  try{ assets=await Cloud.loadAssets(p.id); }
+  catch(e){ if(seq!==_projSeq)return; state.assets=[]; renderLibrary(); toast('Could not open folder: '+((e&&e.message)||e),'error'); return; }
+  if(seq!==_projSeq)return;             // a newer switch (or new folder) superseded this load
+  state.assets=assets; renderLibrary(); }
 async function newProject(){ const name=(prompt('Name this folder (e.g. “Client A — Brand Film”)')||'').trim(); if(!name)return;
-  try{ const p=await Cloud.createProject(PROJECT.workspaceId,name); PROJECTS.push(p); CUR_PROJECT=p; renderProjSwitcher(); state.assets=[]; renderLibrary(); toast('Folder “'+p.name+'” created'); }
+  try{ const p=await Cloud.createProject(PROJECT.workspaceId,name); PROJECTS.push(p); CUR_PROJECT=p; ++_projSeq; renderProjSwitcher(); state.assets=[]; renderLibrary(); toast('Folder “'+p.name+'” created'); }
   catch(e){ toast('Could not create folder: '+((e&&e.message)||e),'error'); } }
 function toggleProjMenu(force){ const m=$('#projMenu'); if(!m)return; const show=(force!=null)?force:m.hidden;
   if(!show){ m.hidden=true; return; }
@@ -158,14 +163,13 @@ function toggleProjMenu(force){ const m=$('#projMenu'); if(!m)return; const show
   $all('.pm-row[data-p]',m).forEach(r=>r.onclick=()=>{ toggleProjMenu(false); switchProject(r.dataset.p); });
   const np=$('[data-newproj]',m); if(np)np.onclick=()=>{ toggleProjMenu(false); newProject(); };
   m.hidden=false; }
-async function shareProject(){ if(!CUR_PROJECT){ toast('Open a folder first.','error'); return; }
+async function shareProject(){ const proj=CUR_PROJECT, n=state.assets.length; if(!proj){ toast('Open a folder first.','error'); return; }
   const card=modal('Share this folder',`<p class="muted" style="margin:0">Creating a public link…</p>`,`<button class="btn btn-ghost" data-close>Close</button>`);
   try{
-    const token=await Cloud.createShareLink({projectId:CUR_PROJECT.id});
+    const token=await Cloud.createShareLink({projectId:proj.id});
     const url=location.origin+location.pathname+'#/share/'+token;
-    const n=state.assets.length;
     const body=$('.modal-body',card); if(body) body.innerHTML=`<div class="field"><label>Public folder link</label><div class="share-link"><input id="shareUrl" value="${esc(url)}" readonly><button class="btn btn-primary" id="copyUrl">Copy</button></div></div>
-      <p class="muted">Anyone with this link can browse <strong>all ${n} item${n===1?'':'s'} in “${esc(CUR_PROJECT.name)}”</strong> and see every comment — <strong>no account needed</strong>.</p>`;
+      <p class="muted">Anyone with this link can browse <strong>all ${n} item${n===1?'':'s'} in “${esc(proj.name)}”</strong> and see every comment — <strong>no account needed</strong>.</p>`;
     const cb=$('#copyUrl'); if(cb)cb.onclick=()=>{const i=$('#shareUrl');i.select();copy(i.value);toast('Link copied');};
   }catch(e){ const body=$('.modal-body',card); if(body) body.innerHTML=`<p class="muted">Could not create the link: ${esc((e&&e.message)||String(e))}</p>`; }
 }
@@ -200,6 +204,9 @@ async function openShared(token){
     shareError(msg); }
 }
 function shareError(msg){ const el=$('#shareError'); if(el){ const m=$('#shareErrMsg'); if(m)m.textContent=msg; el.hidden=false; } else { try{alert(msg);}catch(_){} } }
+// Leaving a review: inside a shared FOLDER keep the #/share/<token> URL so the
+// guest's grid survives Back + a page refresh; otherwise just clear the hash.
+function reviewBack(){ if(document.body.classList.contains('folder-share')&&SHARE&&SHARE.token){ location.hash='#/share/'+SHARE.token; } else { location.hash=''; } }
 (async function(){ await openDB();
   try{ const r=localStorage.getItem(LS); if(r){ const s=JSON.parse(r); if(s&&s.libView) state.libView=s.libView; } }catch(e){}
   wire(); wireSignin(); window.addEventListener('hashchange',route);
@@ -230,7 +237,7 @@ function route(){ const sm=(location.hash||'').match(/^#\/share\/([^/?]+)/);
   else showLibrary(); }
 
 function wire(){
-  $('#backBtn').innerHTML=I.back; $('#backBtn').onclick=()=>{location.hash='';};
+  $('#backBtn').innerHTML=I.back; $('#backBtn').onclick=reviewBack;
   $('#newBtn').innerHTML=I.plus+'New review'; $('#newBtn').onclick=newReview;
   { const pb=$('#projBtn'); if(pb)pb.onclick=(e)=>{ e.stopPropagation(); toggleProjMenu(); };
     const npb=$('#newProjBtn'); if(npb)npb.onclick=newProject;
@@ -270,7 +277,7 @@ function renderUserMenu(){ const m=$('#userMenu');
   const so=$('[data-signout]',m); if(so)so.onclick=async()=>{ m.hidden=true; $('#userBtn').setAttribute('aria-expanded','false'); try{ await Cloud.signOut(); }catch(e){} }; }
 
 /* ---------- library ---------- */
-function showLibrary(){ $('#reviewView').hidden=true; $('#libraryView').hidden=false; $('#backBtn').hidden=true; $('#crumb').textContent='';
+function showLibrary(){ teardownLive(); $('#reviewView').hidden=true; $('#libraryView').hidden=false; $('#backBtn').hidden=true; $('#crumb').textContent='';
   $('#reviewActions').hidden=true; $('#presence').hidden=true; $('#newBtn').hidden=false;
   if(cur&&cur.mediaURL){try{URL.revokeObjectURL(cur.mediaURL);}catch(e){}} if(cur&&cur.compareURL){try{URL.revokeObjectURL(cur.compareURL);}catch(e){}} cur=null; renderLibrary(); }
 const STATUS_ORDER={'In review':0,'Changes requested':1,'Approved':2};
@@ -367,19 +374,41 @@ function deleteAsset(a){
 
 /* ---------- review ---------- */
 async function openReview(id,deep){ const a=asset(id); if(!a){location.hash='';return;} deep=deep||{};
+  teardownLive();
   $('#libraryView').hidden=true; $('#reviewView').hidden=false; $('#backBtn').hidden=false; $('#newBtn').hidden=true;
   $('#reviewActions').hidden=false; $('#presence').hidden=false; $('#crumb').textContent=a.title;
   const v=(deep.v&&a.versions.find(x=>x.id===deep.v))||activeVer(a); a.activeVersionId=v.id;
   if(cur&&cur.mediaURL){try{URL.revokeObjectURL(cur.mediaURL);}catch(e){}}
   if(cur&&cur.compareURL){try{URL.revokeObjectURL(cur.compareURL);}catch(e){}}
-  cur={assetId:id,versionId:v.id,mediaEl:null,mediaURL:null,compareURL:null,pendingPin:null,pendingDrawing:null,drawMode:false,pinMode:false,rangeAnchor:null,compare:false,activeDrawing:null,selectedId:null,showDrawings:[],canvas:null,ctx:null,pendingT:deep.t??null,pendingC:deep.c||null,speed:1,zoom:1,filter:(cur&&cur.filter)||'open',tsort:(cur&&cur.tsort)||'time'};
+  cur={assetId:id,versionId:v.id,mediaEl:null,mediaURL:null,compareURL:null,pendingPin:null,pendingDrawing:null,drawMode:false,pinMode:false,rangeAnchor:null,compare:false,activeDrawing:null,selectedId:null,unsub:null,showDrawings:[],canvas:null,ctx:null,pendingT:deep.t??null,pendingC:deep.c||null,speed:1,zoom:1,filter:(cur&&cur.filter)||'open',tsort:(cur&&cur.tsort)||'time'};
   renderStatus(a); renderPresence(); renderVersions(a); renderFilters(a,v);
   await renderStage(a,v); renderThread(a,v); wireComposer(a,v); wireActions(a);
+  // Live: reflect other people's comments without a manual refresh (signed-in only).
+  if(!document.body.classList.contains('share-mode') && Cloud.subscribeComments){
+    try{ cur.unsub=Cloud.subscribeComments(v.id, ()=>onLiveCommentChange(a.id,v.id)); }catch(e){}
+  }
   $('#exportBtn').onclick=()=>exportFeedback(a);
   $('#shareBtn').onclick=()=>shareModal(a,v);
   $('#addVersionInput').onchange=e=>{upload(e.target.files[0],a,'version');e.target.value='';};
   $('#compareBtn').hidden=a.versions.length<2;
   $('#compareBtn').onclick=()=>{cur.compare=!cur.compare;$('#compareBtn').classList.toggle('active',cur.compare);renderStage(a,activeVer(a)).then(()=>{renderThread(a,activeVer(a));});};
+}
+/* ---------- live comments (realtime) ---------- */
+let _liveTimer=null;
+function teardownLive(){ if(cur&&cur.unsub){ try{cur.unsub();}catch(e){} cur.unsub=null; } if(_liveTimer){ clearTimeout(_liveTimer); _liveTimer=null; } }
+function onLiveCommentChange(assetId,versionId){
+  if(_liveTimer)clearTimeout(_liveTimer);
+  _liveTimer=setTimeout(async()=>{                       // debounce bursts of events
+    if(!cur||cur.versionId!==versionId)return;           // user navigated away
+    const a=asset(assetId); if(!a)return;
+    const v=a.versions.find(x=>x.id===versionId); if(!v)return;
+    try{
+      const fresh=await Cloud.loadVersionComments(versionId);
+      if(!cur||cur.versionId!==versionId)return;         // re-check after await
+      v.comments=fresh;
+      renderThread(a,v); cur._ovSig=null; renderOverlays(v); renderLibrarySilently();
+    }catch(e){/* transient — ignore */}
+  },300);
 }
 function renderStatus(a){ const b=$('#statusBadge'); b.className='status-badge '+(STATUS[a.status]||''); b.innerHTML=`<span class="dot" style="background:currentColor"></span>${esc(a.status)}`; }
 function renderPresence(){ const others=TEAM.filter(n=>n!==me()).slice(0,3); $('#presence').innerHTML=av(me(),'avatar-sm')+others.map(n=>av(n,'avatar-sm')).join(''); }
@@ -832,7 +861,7 @@ function modal(title,body,foot){ const root=$('#modalRoot'),card=$('#modalCard')
 function closeModal(){ $('#modalRoot').hidden=true; $('#modalCard').innerHTML=''; }
 function onKey(e){ if(!$('#modalRoot').hidden&&e.key==='Escape'){closeModal();return;} if($('#reviewView').hidden)return;
   const ae=document.activeElement; const typing=!!(ae&&/^(INPUT|TEXTAREA)$/.test(ae.tagName));
-  if(e.key==='Escape'){if(!$('#mentionMenu').hidden){$('#mentionMenu').hidden=true;return;}if(cur&&cur.drawMode){setDrawMode(false);return;}if(cur&&cur.pinMode){setPinMode(false);return;}location.hash='';return;}
+  if(e.key==='Escape'){if(!$('#mentionMenu').hidden){$('#mentionMenu').hidden=true;return;}if(cur&&cur.drawMode){setDrawMode(false);return;}if(cur&&cur.pinMode){setPinMode(false);return;}reviewBack();return;}
   if(typing)return;
   if(e.key==='?'||(e.key==='/'&&e.shiftKey)){ e.preventDefault(); shortcutsModal(); return; }
   const vid=cur&&cur.mediaEl&&cur.mediaEl.tagName==='VIDEO'?cur.mediaEl:null; if(!vid)return;
