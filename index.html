@@ -34,9 +34,31 @@
   /* SHARE MODE (guest viewer, no account) — hide every editing affordance */
   body.share-mode #backBtn, body.share-mode #newBtn, body.share-mode #presence,
   body.share-mode #reviewActions, body.share-mode .user-wrap, body.share-mode #addVersionLabel,
-  body.share-mode .composer, body.share-mode .note-foot, body.share-mode #snapBtn { display:none !important; }
+  body.share-mode .composer, body.share-mode .note-foot, body.share-mode #snapBtn,
+  body.share-mode #newProjBtn, body.share-mode #shareProjBtn, body.share-mode .proj-chev { display:none !important; }
+  body.share-mode #projBtn{pointer-events:none;}
+  /* inside a shared FOLDER the guest needs Back to return to the grid */
+  body.share-mode.folder-share #backBtn:not([hidden]){display:inline-flex !important;}
   .share-badge{font-size:12px;font-weight:600;color:var(--accent-2,#7C93FF);background:var(--accent-soft,rgba(79,110,240,.16));padding:4px 10px;border-radius:999px;margin-left:6px;white-space:nowrap;}
   body.share-mode #shareBadge{display:inline-block !important;}
+  /* FOLDER (project) switcher in the library header */
+  .lib-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;position:relative;z-index:50;}
+  .lib-head-main{min-width:0;}
+  .lib-head-actions{display:flex;gap:8px;flex-shrink:0;}
+  .proj-switch{position:relative;}
+  .proj-btn{display:inline-flex;align-items:center;gap:8px;background:none;border:0;padding:0;cursor:pointer;font:inherit;color:inherit;}
+  .proj-btn h1,.proj-btn #projName{font-size:26px;font-weight:700;line-height:1.1;margin:0;letter-spacing:-.01em;}
+  #projName{font-size:26px;font-weight:700;line-height:1.1;letter-spacing:-.01em;}
+  .proj-chev{font-size:14px;opacity:.55;}
+  .proj-btn:hover .proj-chev{opacity:.9;}
+  .proj-menu{position:absolute;top:calc(100% + 8px);left:0;z-index:60;min-width:230px;max-height:340px;overflow:auto;
+    background:var(--surface,#161922);border:1px solid var(--line,rgba(255,255,255,.10));border-radius:12px;
+    box-shadow:0 18px 50px rgba(0,0,0,.5);padding:6px;}
+  .pm-row{display:block;width:100%;text-align:left;background:none;border:0;border-radius:8px;cursor:pointer;
+    font:inherit;color:var(--text,#E7E9EE);padding:9px 12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .pm-row:hover{background:var(--accent-soft,rgba(79,110,240,.14));}
+  .pm-row.active{color:var(--accent-2,#9CB0FF);font-weight:600;}
+  .pm-new{border-top:1px solid var(--line,rgba(255,255,255,.08));margin-top:6px;color:var(--accent-2,#9CB0FF);font-weight:600;}
 </style>
 </head>
 <body>
@@ -67,7 +89,20 @@
 <!-- ============ Library ============ -->
 <main id="libraryView" class="view" aria-label="Reviews library">
   <div class="lib-head">
-    <div><h1>Reviews</h1><p id="libSub" class="muted"></p></div>
+    <div class="lib-head-main">
+      <div class="proj-switch" id="projSwitch">
+        <button class="proj-btn" id="projBtn" type="button" aria-haspopup="true" aria-label="Switch folder">
+          <span id="projName">Reviews</span>
+          <span class="proj-chev" aria-hidden="true">▾</span>
+        </button>
+        <div class="proj-menu" id="projMenu" role="menu" hidden></div>
+      </div>
+      <p id="libSub" class="muted"></p>
+    </div>
+    <div class="lib-head-actions">
+      <button class="btn btn-soft btn-sm" id="newProjBtn" type="button">+ New folder</button>
+      <button class="btn btn-soft btn-sm" id="shareProjBtn" type="button">Share folder</button>
+    </div>
   </div>
   <div class="lib-toolbar">
     <div class="lib-search">
@@ -209,6 +244,6 @@
 </div>
 
 <script src="config.js?v=3"></script>
-<script type="module" src="app.js?v=8"></script>
+<script type="module" src="app.js?v=9"></script>
 </body>
 </html>

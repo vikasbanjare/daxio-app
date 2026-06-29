@@ -1,4 +1,4 @@
-import './cloud.js?v=6';   // sets window.Cloud (Supabase Auth + Postgres + Cloudflare R2)
+import './cloud.js?v=9';   // sets window.Cloud (Supabase Auth + Postgres + Cloudflare R2)
 /* ============================================================
    Daxio — Frame.io-style review, wired to a real backend.
    Data in Supabase (Postgres); media in Cloudflare R2.
@@ -130,15 +130,44 @@ function normalizeState(){
   });
   if(!state.currentUser) state.currentUser='You';
 }
-let PROJECT=null;
+let PROJECT=null, PROJECTS=[], CUR_PROJECT=null;
 async function hydrate(){
   console.log('[Daxio] hydrate → ensureProject');
   PROJECT=await Cloud.ensureProject();
   console.log('[Daxio] ensureProject OK', PROJECT);
-  state.assets=await Cloud.loadAssets(PROJECT.projectId);
-  console.log('[Daxio] loadAssets OK', state.assets.length);
+  PROJECTS=await Cloud.listProjects(PROJECT.workspaceId);
+  if(!PROJECTS.length) PROJECTS=[{id:PROJECT.projectId,name:'Reviews'}];
+  CUR_PROJECT=PROJECTS.find(p=>p.id===PROJECT.projectId)||PROJECTS[0];
+  state.assets=await Cloud.loadAssets(CUR_PROJECT.id);
+  console.log('[Daxio] loadAssets OK', state.assets.length, 'in', CUR_PROJECT.name);
   state.currentUser=await Cloud.myName();
   console.log('[Daxio] hydrate done as', state.currentUser);
+}
+/* ---------------- folders (projects) ---------------- */
+function renderProjSwitcher(){ const nm=$('#projName'); if(nm)nm.textContent=(CUR_PROJECT&&CUR_PROJECT.name)||'Reviews'; }
+async function switchProject(pid){ const p=PROJECTS.find(x=>x.id===pid); if(!p||p===CUR_PROJECT)return; CUR_PROJECT=p; renderProjSwitcher();
+  try{ state.assets=await Cloud.loadAssets(p.id); }catch(e){ state.assets=[]; toast('Could not open folder: '+((e&&e.message)||e),'error'); }
+  renderLibrary(); }
+async function newProject(){ const name=(prompt('Name this folder (e.g. “Client A — Brand Film”)')||'').trim(); if(!name)return;
+  try{ const p=await Cloud.createProject(PROJECT.workspaceId,name); PROJECTS.push(p); CUR_PROJECT=p; renderProjSwitcher(); state.assets=[]; renderLibrary(); toast('Folder “'+p.name+'” created'); }
+  catch(e){ toast('Could not create folder: '+((e&&e.message)||e),'error'); } }
+function toggleProjMenu(force){ const m=$('#projMenu'); if(!m)return; const show=(force!=null)?force:m.hidden;
+  if(!show){ m.hidden=true; return; }
+  m.innerHTML=PROJECTS.map(p=>`<button class="pm-row${CUR_PROJECT&&p.id===CUR_PROJECT.id?' active':''}" type="button" data-p="${esc(p.id)}">${esc(p.name)}</button>`).join('')
+    +`<button class="pm-row pm-new" type="button" data-newproj>+ New folder</button>`;
+  $all('.pm-row[data-p]',m).forEach(r=>r.onclick=()=>{ toggleProjMenu(false); switchProject(r.dataset.p); });
+  const np=$('[data-newproj]',m); if(np)np.onclick=()=>{ toggleProjMenu(false); newProject(); };
+  m.hidden=false; }
+async function shareProject(){ if(!CUR_PROJECT){ toast('Open a folder first.','error'); return; }
+  const card=modal('Share this folder',`<p class="muted" style="margin:0">Creating a public link…</p>`,`<button class="btn btn-ghost" data-close>Close</button>`);
+  try{
+    const token=await Cloud.createShareLink({projectId:CUR_PROJECT.id});
+    const url=location.origin+location.pathname+'#/share/'+token;
+    const n=state.assets.length;
+    const body=$('.modal-body',card); if(body) body.innerHTML=`<div class="field"><label>Public folder link</label><div class="share-link"><input id="shareUrl" value="${esc(url)}" readonly><button class="btn btn-primary" id="copyUrl">Copy</button></div></div>
+      <p class="muted">Anyone with this link can browse <strong>all ${n} item${n===1?'':'s'} in “${esc(CUR_PROJECT.name)}”</strong> and see every comment — <strong>no account needed</strong>.</p>`;
+    const cb=$('#copyUrl'); if(cb)cb.onclick=()=>{const i=$('#shareUrl');i.select();copy(i.value);toast('Link copied');};
+  }catch(e){ const body=$('.modal-body',card); if(body) body.innerHTML=`<p class="muted">Could not create the link: ${esc((e&&e.message)||String(e))}</p>`; }
 }
 function signinMsg(m,err){ const p=$('#signinMsg'); if(!p)return; p.textContent=m; p.className='auth-msg'+(err?' err':''); p.hidden=false; }
 function showSignin(){ const l=$('#authLoading'); if(l)l.hidden=true; const s=$('#signinView'); if(s)s.hidden=false; }
@@ -147,16 +176,24 @@ function wireSignin(){
   $all('#signinView [data-oauth]').forEach(b=>b.onclick=async()=>{ try{ await Cloud.signInOAuth(b.dataset.oauth); }catch(e){ signinMsg(e.message||'Sign-in failed',true); } });
   const f=$('#signinEmailForm'); if(f)f.onsubmit=async e=>{ e.preventDefault(); const em=$('#signinEmail').value.trim(); if(!em)return; try{ await Cloud.signInEmail(em); signinMsg('Check your email for the magic link.',false); }catch(err){ signinMsg(err.message||'Could not send the link',true); } };
 }
-async function startApp(){ hideAuth(); await hydrate(); renderUser(); route(); }
+async function startApp(){ hideAuth(); await hydrate(); renderUser(); renderProjSwitcher(); route(); }
 let SHARE=null;
 async function openShared(token){
   document.body.classList.add('share-mode'); hideAuth();
   try{
     const data=await Cloud.loadShared(token);
-    SHARE={token:token, canComment:!!(data.share&&data.share.can_comment), project:data.project};
+    const scope=(data.share&&data.share.scope)||(((data.assets||[]).length>1)?'project':'asset');
+    SHARE={token:token, canComment:!!(data.share&&data.share.can_comment), project:data.project, scope:scope};
     state.assets=data.assets||[];
-    if(!state.assets.length){ shareError('This shared review has nothing to show.'); return; }
-    openReview(state.assets[0].id,{});
+    if(!state.assets.length){ shareError('This shared link has nothing to show.'); return; }
+    if(scope==='project'){
+      // A whole folder was shared: show a read-only grid the guest can browse.
+      document.body.classList.add('folder-share');
+      const nm=$('#projName'); if(nm)nm.textContent=(data.project&&data.project.name)||'Shared folder';
+      showLibrary();
+    } else {
+      openReview(state.assets[0].id,{});
+    }
   }catch(e){ console.error('[Daxio] share load failed',e);
     var s=String((e&&e.message)||e), msg='This shared link is unavailable.';
     if(/410/.test(s))msg='This shared link has expired.'; else if(/404/.test(s))msg='This shared link was not found.'; else if(/401/.test(s))msg='This shared link is password-protected.';
@@ -195,6 +232,10 @@ function route(){ const sm=(location.hash||'').match(/^#\/share\/([^/?]+)/);
 function wire(){
   $('#backBtn').innerHTML=I.back; $('#backBtn').onclick=()=>{location.hash='';};
   $('#newBtn').innerHTML=I.plus+'New review'; $('#newBtn').onclick=newReview;
+  { const pb=$('#projBtn'); if(pb)pb.onclick=(e)=>{ e.stopPropagation(); toggleProjMenu(); };
+    const npb=$('#newProjBtn'); if(npb)npb.onclick=newProject;
+    const spb=$('#shareProjBtn'); if(spb)spb.onclick=shareProject;
+    document.addEventListener('click',(e)=>{ const m=$('#projMenu'); const sw=$('#projSwitch'); if(m&&!m.hidden&&sw&&!sw.contains(e.target)) toggleProjMenu(false); }); }
   $('#exportBtn').innerHTML=I.download;
   $('#shareBtn').innerHTML=I.link+'Share'; $('#requestBtn').textContent='Request changes'; $('#approveBtn').innerHTML=I.check+'Approve';
   $('#compareBtn').innerHTML=I.compare+'Compare';
@@ -274,7 +315,10 @@ function renderLibrary(){
   const q=(lv.q||'').trim().toLowerCase(); if(q)list=list.filter(a=>a.title.toLowerCase().includes(q));
   list=sortAssets(list,lv.sort);
   const total=state.assets.length, shown=list.length, filtered=!!(q||lv.status!=='all');
-  $('#libSub').textContent=(filtered?`${shown} of ${total} ${total===1?'review':'reviews'}`:`${total} ${total===1?'review':'reviews'}`)+` · signed in as ${me()}`;
+  const sm=document.body.classList.contains('share-mode');
+  $('#libSub').textContent=sm
+    ? `${total} item${total===1?'':'s'} · shared with you · no account needed`
+    : (filtered?`${shown} of ${total} ${total===1?'review':'reviews'}`:`${total} ${total===1?'review':'reviews'}`)+` · signed in as ${me()}`;
   // empty
   if(!shown){ g.hidden=true; empty.hidden=false;
     empty.innerHTML=filtered?`<h3>No matching reviews</h3><p>Nothing matches your search or filter.</p><button class="btn btn-soft btn-sm" id="libClear">Clear filters</button>`
@@ -286,7 +330,7 @@ function renderLibrary(){
     g.innerHTML=STATUS_FULL.map(st=>{ const items=list.filter(a=>a.status===st); if(!items.length)return '';
       return `<section class="lib-group"><div class="lib-group-h"><span class="lc-badge ${STATUS[st]||''}" style="position:static">${esc(st)}</span><span class="lib-group-cnt">${items.length}</span></div><div class="lib-grid-inner">${items.map(libCard).join('')}</div></section>`; }).join('');
   } else { g.className='lib-grid';
-    const showNew=!q&&lv.status==='all';
+    const showNew=!q&&lv.status==='all'&&!sm;
     g.innerHTML=(showNew?`<div class="lib-card new" id="newCard">${I.up}<span>New review</span></div>`:'')+list.map(libCard).join('');
     const nc=$('#newCard'); if(nc)nc.onclick=newReview;
   }
@@ -299,7 +343,7 @@ function newReview(){
   $('#nrTitle',card).focus();
   $('#nrTitle',card).onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); $('#nrGo',card).click(); } };
   $('#nrGo',card).onclick=async()=>{ const t=$('#nrTitle',card).value.trim()||'Untitled review'; const go=$('#nrGo',card); go.disabled=true;
-    try{ const a=await Cloud.createAsset(PROJECT.projectId,t); const v=await Cloud.addVersion(a.id,{label:'V1',kind:null,r2_key:null,duration:null}); a.versions=[v]; a.activeVersionId=v.id; state.assets.unshift(a); closeModal(); location.hash='#/a/'+encodeURIComponent(a.id); }
+    try{ const a=await Cloud.createAsset(CUR_PROJECT.id,t); const v=await Cloud.addVersion(a.id,{label:'V1',kind:null,r2_key:null,duration:null}); a.versions=[v]; a.activeVersionId=v.id; state.assets.unshift(a); closeModal(); location.hash='#/a/'+encodeURIComponent(a.id); }
     catch(e){ go.disabled=false; toast('Could not create review: '+((e&&e.message)||e),'error'); } };
 }
 function assetMenu(a){
@@ -675,7 +719,7 @@ async function upload(file,a,mode){ if(!file)return;
   const kind=/^video\//.test(file.type)?'video':'image';
   const t=toast('Uploading '+file.name+'…','info');
   try{
-    const { r2_key }=await Cloud.uploadFile(file,PROJECT.projectId);
+    const { r2_key }=await Cloud.uploadFile(file,CUR_PROJECT.id);
     let v;
     if(mode==='version'&&a.versions.length&&hasMedia(activeVer(a))){
       v=await Cloud.addVersion(a.id,{label:'V'+(a.versions.length+1),kind,r2_key,duration:null}); a.versions.push(v); a.activeVersionId=v.id;

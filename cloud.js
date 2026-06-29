@@ -66,6 +66,22 @@ async function ensureProject() {
   return { workspaceId: data.workspaceId, projectId: data.projectId };
 }
 
+// All folders (projects) in the workspace, oldest first.
+async function listProjects(workspaceId) {
+  return unwrap(await supabase.from('projects')
+    .select('id,name,color,created_at')
+    .eq('workspace_id', workspaceId)
+    .order('created_at', { ascending: true }));
+}
+// Create a new folder. The "proj rw" RLS rule allows this directly because the
+// WITH CHECK is is_member(workspace_id), which is true for the creator.
+async function createProject(workspaceId, name) {
+  const u = await getUser();
+  return unwrap(await supabase.from('projects')
+    .insert({ workspace_id: workspaceId, name: name, created_by: u.id })
+    .select('id,name,color,created_at').single());
+}
+
 /* ---------------- row -> demo shape ---------------- */
 function groupReactions(rows, pm) {
   const r = {};
@@ -197,10 +213,17 @@ async function toggleReaction(commentId, emoji) {
 }
 
 /* ---------------- share + realtime ---------------- */
-async function createShareLink(assetId) {
+// Create a public share link for a single asset OR a whole folder (project).
+// Pass { assetId } or { projectId }. (A bare string is treated as an assetId for
+// back-compat with the per-review Share button.)
+async function createShareLink(opts) {
+  if (typeof opts === 'string') opts = { assetId: opts };
+  opts = opts || {};
   const u = await getUser();
-  const row = unwrap(await supabase.from('share_links')
-    .insert({ asset_id: assetId, can_comment: true, created_by: u.id }).select().single());
+  const ins = { can_comment: true, created_by: u.id };
+  if (opts.projectId) ins.project_id = opts.projectId;
+  else ins.asset_id = opts.assetId;
+  const row = unwrap(await supabase.from('share_links').insert(ins).select().single());
   return row.token;
 }
 // PUBLIC (no login): load a shared asset via the /api/share function, mapped to the
@@ -234,7 +257,7 @@ function subscribeComments(versionId, onChange) {
 
 window.Cloud = {
   getUser, onAuth, signInEmail, signInOAuth, signOut, myName,
-  ensureProject, loadAssets,
+  ensureProject, listProjects, createProject, loadAssets,
   createAsset, renameAsset, setAssetStatus, deleteAsset,
   addVersion, updateVersion, uploadFile, mediaUrl,
   addComment, setResolved, deleteComment, addReply, toggleReaction,
